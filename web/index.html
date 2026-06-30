@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>車刀拍照與推論錄音</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #111827;
+      color: white;
+      font-family: "Microsoft JhengHei UI", system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      min-height: 68px;
+      padding: 12px 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1 { margin: 0; font-size: clamp(22px, 3vw, 34px); }
+    #status { color: #fbbf24; font-size: clamp(15px, 2vw, 22px); text-align: right; }
+    .work-area {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 12px;
+      padding: 0 12px 12px;
+    }
+    .camera-panel, .result-panel {
+      background: black;
+      border-radius: 14px;
+      overflow: hidden;
+      min-height: 0;
+      position: relative;
+    }
+    .camera-panel { display: grid; place-items: center; }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      transform: scale(var(--zoom, 1));
+      transition: transform .15s ease;
+    }
+    canvas { display: none; }
+    .result-panel {
+      display: flex;
+      flex-direction: column;
+      background: #020617;
+      border: 2px solid #374151;
+    }
+    .result-title {
+      padding: 14px;
+      font-size: clamp(18px, 2.3vw, 28px);
+      font-weight: 700;
+      background: #1f2937;
+      border-bottom: 1px solid #374151;
+    }
+    #resultImage {
+      width: 100%;
+      flex: 1;
+      min-height: 0;
+      object-fit: contain;
+      background: black;
+    }
+    #resultHint {
+      padding: 12px 14px;
+      color: #cbd5e1;
+      font-size: clamp(15px, 1.8vw, 20px);
+      line-height: 1.45;
+      min-height: 72px;
+    }
+    footer {
+      min-height: 126px;
+      padding: 16px;
+      background: #1f2937;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    button {
+      min-width: 160px;
+      min-height: 72px;
+      border: 0;
+      border-radius: 14px;
+      color: white;
+      background: #2563eb;
+      font: 700 clamp(18px, 2.4vw, 30px) "Microsoft JhengHei UI", system-ui, sans-serif;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    #capture { background: #059669; min-width: 230px; }
+    #infer { background: #7c3aed; min-width: 230px; }
+    #record { background: #dc2626; min-width: 230px; }
+    #record.recording { animation: pulse 1s infinite; }
+    button:active:not(:disabled) { transform: scale(.98); filter: brightness(.9); }
+    .flash { animation: flash .18s; }
+    @keyframes flash { 50% { opacity: .15; } }
+    @keyframes pulse { 50% { filter: brightness(1.35); } }
+    @media (max-width: 900px) {
+      .work-area { grid-template-columns: 1fr; grid-template-rows: 2fr 1fr; }
+      button { min-width: 44%; flex: 1; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>車刀拍照 / 推論 / 錄音</h1>
+    <div id="status">準備開啟鏡頭...</div>
+  </header>
+  <section class="work-area">
+    <main class="camera-panel" id="cameraPanel">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="canvas"></canvas>
+    </main>
+    <aside class="result-panel">
+      <div class="result-title" id="resultTitle">預覽區</div>
+      <img id="resultImage" alt="拍照或推論預覽">
+      <div id="resultHint">左邊確認鏡頭畫面，按拍照後右邊會顯示原圖。確認聚焦後再按推論。</div>
+    </aside>
+  </section>
+  <footer>
+    <button id="switch">切換鏡頭</button>
+    <button id="zoomOut">縮小</button>
+    <button id="zoomReset">100%</button>
+    <button id="zoomIn">放大</button>
+    <button id="capture">拍照</button>
+    <button id="infer" disabled>推論</button>
+    <button id="record" disabled>開始錄音</button>
+    <button id="fullscreen">全螢幕</button>
+  </footer>
+  <script>
+    const video = document.querySelector("#video");
+    const canvas = document.querySelector("#canvas");
+    const cameraPanel = document.querySelector("#cameraPanel");
+    const status = document.querySelector("#status");
+    const resultImage = document.querySelector("#resultImage");
+    const resultTitle = document.querySelector("#resultTitle");
+    const resultHint = document.querySelector("#resultHint");
+    const captureButton = document.querySelector("#capture");
+    const inferButton = document.querySelector("#infer");
+    const recordButton = document.querySelector("#record");
+
+    let cameraStream;
+    let micStream;
+    let mediaRecorder;
+    let audioChunks = [];
+    let currentBaseName = "";
+    let inferenceDone = false;
+    let busy = false;
+    let devices = [];
+    let deviceIndex = 0;
+    let zoom = 1;
+    const minZoom = 1;
+    const maxZoom = 4;
+    const zoomStep = 0.25;
+
+    function setStatus(text, color = "#86efac") {
+      status.textContent = text;
+      status.style.color = color;
+    }
+
+    function setBusy(value) {
+      busy = value;
+      updateButtons();
+    }
+
+    function updateButtons() {
+      const recording = mediaRecorder && mediaRecorder.state === "recording";
+      captureButton.disabled = busy || recording;
+      inferButton.disabled = busy || recording || !currentBaseName || inferenceDone;
+      recordButton.disabled = busy || !currentBaseName || !inferenceDone;
+    }
+
+    function showResult(title, hint, imageSrc) {
+      resultTitle.textContent = title;
+      resultHint.textContent = hint;
+      if (imageSrc) resultImage.src = imageSrc;
+    }
+
+    async function loadCamera(deviceId) {
+      if (cameraStream) cameraStream.getTracks().forEach(track => track.stop());
+      const videoOptions = deviceId
+        ? { deviceId: { exact: deviceId } }
+        : { width: { ideal: 1920 }, height: { ideal: 1080 } };
+      cameraStream = await navigator.mediaDevices.getUserMedia({ video: videoOptions, audio: false });
+      video.srcObject = cameraStream;
+      devices = (await navigator.mediaDevices.enumerateDevices()).filter(item => item.kind === "videoinput");
+      setStatus(`鏡頭已開啟，共找到 ${devices.length} 個影像裝置`);
+    }
+
+    async function start() {
+      if (!window.isSecureContext) {
+        setStatus("目前不是 HTTPS，瀏覽器可能會禁止鏡頭與麥克風", "#f87171");
+        updateButtons();
+        return;
+      }
+      try {
+        await loadCamera();
+      } catch (error) {
+        setStatus(`無法開啟鏡頭：${error.message}`, "#f87171");
+      }
+      updateButtons();
+    }
+
+    function updateZoom(nextZoom) {
+      zoom = Math.min(maxZoom, Math.max(minZoom, nextZoom));
+      video.style.setProperty("--zoom", zoom);
+      document.querySelector("#zoomReset").textContent = `${Math.round(zoom * 100)}%`;
+    }
+
+    function captureCanvasDataUrl() {
+      const cropWidth = video.videoWidth / zoom;
+      const cropHeight = video.videoHeight / zoom;
+      const cropX = (video.videoWidth - cropWidth) / 2;
+      const cropY = (video.videoHeight - cropHeight) / 2;
+      canvas.width = Math.round(cropWidth);
+      canvas.height = Math.round(cropHeight);
+      canvas.getContext("2d").drawImage(
+        video,
+        cropX, cropY, cropWidth, cropHeight,
+        0, 0, canvas.width, canvas.height
+      );
+      return canvas.toDataURL("image/jpeg", 0.95);
+    }
+
+    function preferredAudioType() {
+      const types = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+        "audio/mp4"
+      ];
+      return types.find(type => MediaRecorder.isTypeSupported(type)) || "";
+    }
+
+    document.querySelector("#zoomOut").addEventListener("click", () => updateZoom(zoom - zoomStep));
+    document.querySelector("#zoomIn").addEventListener("click", () => updateZoom(zoom + zoomStep));
+    document.querySelector("#zoomReset").addEventListener("click", () => updateZoom(1));
+
+    document.querySelector("#switch").addEventListener("click", async () => {
+      if (devices.length < 2) {
+        setStatus("沒有其他鏡頭可以切換", "#fbbf24");
+        return;
+      }
+      deviceIndex = (deviceIndex + 1) % devices.length;
+      try {
+        await loadCamera(devices[deviceIndex].deviceId);
+      } catch (error) {
+        setStatus(`切換鏡頭失敗：${error.message}`, "#f87171");
+      }
+    });
+
+    captureButton.addEventListener("click", async () => {
+      if (!video.videoWidth) {
+        setStatus("目前還沒有鏡頭畫面", "#f87171");
+        return;
+      }
+      setBusy(true);
+      setStatus("拍照中...", "#fbbf24");
+      try {
+        const image = captureCanvasDataUrl();
+        cameraPanel.classList.remove("flash");
+        void cameraPanel.offsetWidth;
+        cameraPanel.classList.add("flash");
+
+        const response = await fetch("/api/captures", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error);
+        currentBaseName = result.baseName;
+        inferenceDone = false;
+        showResult("拍照預覽", "確認有聚焦到車刀後，請按推論。原圖已先存到 photos/original。", result.previewImage);
+        setStatus("拍照完成，請確認預覽後按推論", "#67e8f9");
+      } catch (error) {
+        setStatus(`拍照失敗：${error.message}`, "#f87171");
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    inferButton.addEventListener("click", async () => {
+      if (!currentBaseName) return;
+      setBusy(true);
+      setStatus("推論中：物件偵測 > bbox 放大裁切 > 關鍵點分析", "#fbbf24");
+      try {
+        const response = await fetch("/api/infer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ baseName: currentBaseName })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          inferenceDone = false;
+          showResult("物件偵測失敗", "沒有偵測到車刀，請重新拍攝。", result.previewImage);
+          setStatus(result.error || "物件偵測失敗，請重新拍攝", "#f87171");
+          currentBaseName = "";
+          return;
+        }
+
+        inferenceDone = Boolean(result.canRecord);
+        if (result.status === "partial") {
+          showResult("關鍵點失敗，已保留 bbox 放大圖", "可以先錄音，系統會把放大 bbox 圖與 mp4 存到 photos/object_detection。", result.previewImage);
+          setStatus("關鍵點偵測失敗，可先錄音保存物件偵測結果", "#fbbf24");
+        } else {
+          showResult("分析完成", "可以開始錄音。錄音後會把關鍵點結果與 mp4 存到 photos/keypoint_detection，並在 object_detection 也保存一份錄音。", result.previewImage);
+          setStatus("分析完成，請開始錄音", "#67e8f9");
+        }
+      } catch (error) {
+        inferenceDone = false;
+        setStatus(`推論失敗：${error.message}`, "#f87171");
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    recordButton.addEventListener("click", async () => {
+      if (!inferenceDone || !currentBaseName) {
+        setStatus("請先拍照並完成推論", "#fbbf24");
+        return;
+      }
+
+      if (mediaRecorder && mediaRecorder.state === "recording") {
+        mediaRecorder.stop();
+        recordButton.disabled = true;
+        recordButton.textContent = "儲存錄音中...";
+        return;
+      }
+
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        audioChunks = [];
+        const mimeType = preferredAudioType();
+        mediaRecorder = new MediaRecorder(micStream, mimeType ? { mimeType } : undefined);
+        mediaRecorder.addEventListener("dataavailable", event => {
+          if (event.data.size > 0) audioChunks.push(event.data);
+        });
+        mediaRecorder.addEventListener("stop", saveRecording);
+        mediaRecorder.start();
+        recordButton.className = "recording";
+        recordButton.textContent = "停止錄音";
+        updateButtons();
+        setStatus("錄音中，描述完成後再按一次停止錄音", "#fca5a5");
+      } catch (error) {
+        setStatus(`無法開啟麥克風：${error.message}`, "#f87171");
+      }
+    });
+
+    async function saveRecording() {
+      setBusy(true);
+      const finishedBaseName = currentBaseName;
+      const audioType = mediaRecorder.mimeType || "audio/webm";
+      const audioBlob = new Blob(audioChunks, { type: audioType });
+      if (micStream) micStream.getTracks().forEach(track => track.stop());
+
+      const formData = new FormData();
+      formData.append("baseName", finishedBaseName);
+      formData.append("audio", audioBlob, `${finishedBaseName}.webm`);
+
+      try {
+        const response = await fetch("/api/audio", { method: "POST", body: formData });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error);
+        setStatus(`已儲存：${result.photoFilename} + ${result.audioFilename}`, "#67e8f9");
+        showResult("儲存完成", `照片與 mp4 已用同一個檔名保存：${finishedBaseName}`, resultImage.src);
+        currentBaseName = "";
+        inferenceDone = false;
+        recordButton.className = "";
+        recordButton.textContent = "開始錄音";
+      } catch (error) {
+        setStatus(`錄音儲存失敗：${error.message}`, "#f87171");
+        recordButton.className = "";
+        recordButton.textContent = "重新錄音";
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    document.querySelector("#fullscreen").addEventListener("click", async () => {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen();
+    });
+
+    start();
+  </script>
+</body>
+</html>

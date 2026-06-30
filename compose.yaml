@@ -1,0 +1,38 @@
+services:
+  camera-web:
+    build: .
+    ports:
+      - "8001:8000"
+    depends_on:
+      - detection-api
+      - keypoint-api
+    volumes:
+      - ./photos:/app/photos
+      - ./results:/app/results
+      - ./pending:/app/pending
+      - ./certs:/app/certs
+    environment:
+      CAMERA_HOST_IP: ${CAMERA_HOST_IP:-127.0.0.1}
+    restart: unless-stopped
+
+  detection-api:
+    build:
+      context: ./toolknife_ai
+      dockerfile: docker/detection.Dockerfile
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./toolknife_data:/app/data
+      - ./toolknife_ai/weights:/app/weights:ro
+    restart: unless-stopped
+
+  keypoint-api:
+    build:
+      context: ./toolknife_ai
+      dockerfile: docker/keypoint.Dockerfile
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./toolknife_data:/app/data
+      - ./toolknife_ai/weights:/app/weights:ro
+    restart: unless-stopped

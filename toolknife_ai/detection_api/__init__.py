@@ -1,0 +1,1 @@
+﻿"""Detection FastAPI service package."""

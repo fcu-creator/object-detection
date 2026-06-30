@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+toolknife_ai/config/access_token.txt
+toolknife_ai/weights/*.backup_*.pt
+
+datasets/
+photos/
+pending/
+results/
+.env

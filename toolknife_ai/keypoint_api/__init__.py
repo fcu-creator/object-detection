@@ -1,0 +1,1 @@
+﻿"""Keypoint FastAPI service package."""
